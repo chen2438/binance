@@ -10,7 +10,7 @@ CandlePilot 用于研究 **Binance USDT-M 永续合约**：先用规则筛选标
 
 ## 当前状态
 
-已完成数据管线、回测引擎核心、标的筛选层与多标的组合回测。
+已完成数据管线、回测引擎核心、标的筛选层、多标的组合回测与评估层。规则搜索尚未开始。
 
 ## 目录结构
 
@@ -20,6 +20,7 @@ CandlePilot 用于研究 **Binance USDT-M 永续合约**：先用规则筛选标
 - `src/candlepilot/data/` — 历史数据管线（下载、校验、解析、落盘）。
 - `src/candlepilot/backtest/` — 回测引擎（成本模型、持仓与强平、执行语义、单标的与组合事件循环、指标）。
 - `src/candlepilot/screen/` — 标的筛选层（日线面板、时点特征、滚动标的池）。
+- `src/candlepilot/evaluate/` — 评估层（walk-forward 切分、参数扫描、多重检验校正）。
 - `src/candlepilot/strategies/` — 策略；目前只有用于验证引擎的参考实现。
 - `src/candlepilot/cli.py` — `candlepilot` 命令行入口。
 - `tests/` — pytest 单元测试。
@@ -252,6 +253,63 @@ selections = Screener(rule, rebalance="W-MON").run(features)
 ```
 
 规则是 `Callable[[pd.DataFrame], list[str]]`，接收单个调仓日的合格截面，返回标的列表。`top_n` 只是内置的一种。
+
+## 评估层
+
+这一层**在规则搜索开始之前**建成，是刻意的。一旦看过样本内结果，之后关于切分方式、目标函数、校正方法的每个选择都由一个已经知道答案的人做出，校正也就不再是校正。
+
+### 为什么单靠样本外不够
+
+扫描 N 组参数必然产生一个好看的最优结果，即使没有任何参数组具备边际——N 个含噪 Sharpe 的最大值随 N 增长。把这个最大值当作单一假设来汇报，是策略研究里最核心的过拟合错误。
+
+实测演示（`纯随机游走`数据，60000 根 1m K 线，零成本）：
+
+| 指标 | 值 |
+|---|---|
+| 扫描参数组数 | 72 |
+| 最佳年化 Sharpe | **5.00** |
+| 总收益 | +29.4% |
+| PSR（对比零） | **0.9544** |
+| 72 次试验的期望最大 Sharpe | 4.35（年化） |
+| **DSR（对比运气最大值）** | **0.5865** |
+
+数据里没有任何可提取的结构，但最佳参数组给出年化 Sharpe 5.00。**PSR 会以 0.954 放行它**（超过 95% 门槛）；只有把搜索次数计入的 DSR 才判定它与运气无异。
+
+### 三个统计量
+
+按 Bailey 与 López de Prado：
+
+- **PSR**（`probabilistic_sharpe`）— 真实 Sharpe 超过基准的概率，校正样本长度、偏度与峰度。交易收益既不正态也不独立，而裸 Sharpe 默默假设两者都成立。
+- **E[max SR]**（`expected_max_sharpe`）— N 次试验中最好的那个仅凭运气能达到的 Sharpe。这是搜索赢家必须跨过的门槛。
+- **DSR**（`deflated_sharpe`）— 以 E[max SR] 为基准的 PSR，即"赢家真的胜过运气本来就会产出的水平"的概率。**低于约 0.95 即无法与搜索运气区分。**
+
+另有 `minimum_track_record_length`：回答"这段回测长度是否足以支撑这个结论"，而裸 Sharpe 本身从不提出这个问题。
+
+所有函数都在收益的原始频率上工作。先年化再做检验会在不增加观测数的前提下抬高统计量，而这正是它们要抓的错误。
+
+### Walk-forward 与禁运期
+
+`walk_forward` 生成滚动或锚定的训练/测试折。**禁运期（embargo）不是可选的礼节**：测试窗第一根 K 线上的策略会读取一个回看窗口，该窗口伸进训练数据，于是"样本外"期间的开头带着部分样本内信息。禁运期长度必须**至少等于策略最长的回看窗口**——短于回看窗口的禁运期恰好留下了它本要堵上的漏洞。
+
+`rolling` 与 `anchored` 回答的是不同问题（近期数据 vs 全部历史），因此模式是显式参数而非推断得出，混用会让结果不可比。
+
+窗口切分用布尔掩码而非 `.loc` 标签切片，因为标签切片右端闭合，会把边界那根 K 线同时放进训练集和测试集。
+
+### 用法
+
+```python
+from candlepilot.evaluate import run_walk_forward
+
+wf = run_walk_forward(
+    bars, DonchianBreakout,
+    {"lookback": [60, 120, 240], "max_hold": [120, 480]},
+    train="30D", test="10D", embargo="1D",
+)
+print(wf.folds)      # 每折选中的参数与样本外表现
+print(wf.report())   # 拼接后的样本外 Sharpe、PSR、DSR
+```
+
+参数只在**训练**窗口上选择，汇报的结果只来自选择者未见过的**测试**窗口。每次试验的 Sharpe 都被保留而非只留赢家的，因为试验间的离散度正是 `expected_max_sharpe` 的输入——没有它就无从判断最佳结果凭运气本该有多好看。
 
 ## 本地环境搭建
 
