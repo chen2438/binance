@@ -60,8 +60,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "universe":
         frame = build_universe(quote=args.quote, store=store)
-        live = int(frame["is_live"].fillna(False).sum())
-        print(f"{len(frame)} archived symbols, {live} live, {len(frame) - live} delisted")
+        print(f"{len(frame)} archived symbols")
+        if "status" in frame.columns and frame["status"].notna().any():
+            for status, count in frame["status"].value_counts().items():
+                print(f"  {status:<10} {count}")
         print(f"wrote {store.root / 'universe.parquet'}")
         return 0
 

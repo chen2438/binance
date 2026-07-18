@@ -166,26 +166,35 @@ def build_universe(
     store: ParquetStore | None = None,
     client: VisionClient | None = None,
 ) -> pd.DataFrame:
-    """Build the symbol universe from the bucket, flagging delisted symbols.
+    """Build the symbol universe from the bucket, recording each symbol's status.
 
     The bucket lists every symbol that ever published data; exchangeInfo lists only
-    those trading now. The difference is exactly the delisted set, which must stay
-    in the universe or screening research inherits survivorship bias.
+    those still listed. Symbols absent from exchangeInfo are delisted and must stay
+    in the universe, or screening research inherits survivorship bias.
+
+    Status is recorded verbatim rather than as a boolean because ``SETTLING`` — a
+    perpetual being wound down — is neither cleanly live nor cleanly delisted: it is
+    outside the trading set yet still publishing bars.
     """
     store = store or ParquetStore()
     client = client or VisionClient()
 
     archived = client.list_symbols(quote=quote)
     try:
-        live = set(client.live_perpetuals(quote=quote))
+        status = client.perpetual_status(quote=quote)
     except DownloadError as error:
-        log.warning("could not read exchangeInfo, marking liveness unknown: %s", error)
-        live = None
+        log.warning("could not read exchangeInfo, marking status unknown: %s", error)
+        status = None
 
     frame = pd.DataFrame({"symbol": archived})
-    frame["is_live"] = (
-        frame["symbol"].isin(live) if live is not None else pd.NA
-    ).astype("boolean")
+    if status is None:
+        frame["status"] = pd.NA
+        frame["is_live"] = pd.NA
+    else:
+        # Present in the archive but absent from exchangeInfo == delisted.
+        frame["status"] = frame["symbol"].map(status).fillna("DELISTED")
+        frame["is_live"] = frame["status"] == "TRADING"
+    frame["is_live"] = frame["is_live"].astype("boolean")
     frame["quote"] = quote
     store.write_universe(frame)
     return frame

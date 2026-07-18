@@ -140,22 +140,32 @@ class VisionClient:
         ]
         return sorted(set(selected))
 
-    def live_perpetuals(self, *, quote: str = "USDT") -> list[str]:
-        """List currently trading perpetuals via the public exchangeInfo endpoint.
+    def perpetual_status(self, *, quote: str = "USDT") -> dict[str, str]:
+        """Map symbol -> exchangeInfo status for currently listed perpetuals.
 
-        Read-only public market metadata; no key, no account access. Used only to
-        mark which archived symbols are delisted.
+        Read-only public market metadata; no key, no account access.
+
+        The status matters and is not binary. Binance reports ``SETTLING`` for a
+        perpetual being wound down: it is absent from the trading set but still
+        publishing data today. Collapsing that into "delisted" both overstates the
+        delisted count and mislabels symbols that still have live bars.
         """
         payload = self._get("https://fapi.binance.com/fapi/v1/exchangeInfo")
         import json
 
         info = json.loads(payload or b"{}")
-        return sorted(
-            item["symbol"]
+        return {
+            item["symbol"]: item.get("status", "UNKNOWN")
             for item in info.get("symbols", [])
-            if item.get("contractType") == "PERPETUAL"
-            and item.get("quoteAsset") == quote
-            and item.get("status") == "TRADING"
+            if item.get("contractType") == "PERPETUAL" and item.get("quoteAsset") == quote
+        }
+
+    def live_perpetuals(self, *, quote: str = "USDT") -> list[str]:
+        """Symbols currently in the tradeable set (``status == TRADING``)."""
+        return sorted(
+            symbol
+            for symbol, status in self.perpetual_status(quote=quote).items()
+            if status == "TRADING"
         )
 
     def fetch(self, archive: Archive, *, allow_missing: bool = True) -> bytes | None:

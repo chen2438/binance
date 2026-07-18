@@ -89,3 +89,30 @@ def test_funding_is_not_an_interval_dataset() -> None:
     archive = Archive("BTCUSDT", "fundingRate", "2024-06")
     assert not archive.is_interval_dataset
     assert archive.filename == "BTCUSDT-fundingRate-2024-06.zip"
+
+
+def test_universe_records_settling_separately_from_delisted() -> None:
+    """SETTLING symbols still publish bars; collapsing them into "delisted" is wrong."""
+    import pandas as pd
+
+    from candlepilot.data.ingest import build_universe
+
+    class FakeClient:
+        def list_symbols(self, *, quote="USDT"):
+            return ["AAAUSDT", "BBBUSDT", "CCCUSDT"]
+
+        def perpetual_status(self, *, quote="USDT"):
+            # CCCUSDT is absent -> delisted.
+            return {"AAAUSDT": "TRADING", "BBBUSDT": "SETTLING"}
+
+    class FakeStore:
+        def write_universe(self, frame):
+            return None
+
+    frame = build_universe(store=FakeStore(), client=FakeClient()).set_index("symbol")
+    assert frame.loc["AAAUSDT", "status"] == "TRADING"
+    assert frame.loc["BBBUSDT", "status"] == "SETTLING"
+    assert frame.loc["CCCUSDT", "status"] == "DELISTED"
+    assert bool(frame.loc["AAAUSDT", "is_live"])
+    assert not bool(frame.loc["BBBUSDT", "is_live"]), "settling is not trading"
+    assert not bool(frame.loc["CCCUSDT", "is_live"])
