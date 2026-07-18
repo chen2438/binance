@@ -122,7 +122,9 @@ def ingest_symbols(
 ) -> IngestReport:
     """Ingest klines and/or funding rates for a list of symbols."""
     store = store or ParquetStore()
-    client = client or VisionClient()
+    # Size the connection pool to the worker count, otherwise surplus workers churn
+    # connections instead of reusing them.
+    client = client or VisionClient(pool_size=workers)
     report = IngestReport()
 
     archives: list[Archive] = []

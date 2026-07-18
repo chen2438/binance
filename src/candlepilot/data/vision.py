@@ -30,6 +30,10 @@ _PERPETUAL = re.compile(r"^[A-Z0-9]+$")
 
 USER_AGENT = "candlepilot/0.1 (backtest research; public archive only)"
 
+# Connection pool size when none is given. Kept above the default worker count so a
+# plain VisionClient() is not the bottleneck.
+DEFAULT_POOL_SIZE = 16
+
 
 class DownloadError(RuntimeError):
     """Raised when an archive cannot be fetched or fails verification."""
@@ -83,12 +87,28 @@ class Archive:
 class VisionClient:
     """Thin HTTP client with retries over the public archive bucket."""
 
-    def __init__(self, *, retries: int = 4, backoff: float = 1.5, timeout: int = 120):
+    def __init__(
+        self,
+        *,
+        retries: int = 4,
+        backoff: float = 1.5,
+        timeout: int = 120,
+        pool_size: int = DEFAULT_POOL_SIZE,
+    ):
         self.retries = retries
         self.backoff = backoff
         self.timeout = timeout
         self._session = requests.Session()
         self._session.headers["User-Agent"] = USER_AGENT
+
+        # requests defaults to a 10-connection pool. Running more workers than that
+        # makes every surplus connection get discarded and re-established, so a large
+        # ingest pays a TLS handshake per archive instead of reusing keep-alive.
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=max(pool_size, 1), pool_maxsize=max(pool_size, 1)
+        )
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
 
     def _get(self, url: str, *, allow_missing: bool = False) -> bytes | None:
         last_error: Exception | None = None

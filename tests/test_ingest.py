@@ -116,3 +116,23 @@ def test_universe_records_settling_separately_from_delisted() -> None:
     assert bool(frame.loc["AAAUSDT", "is_live"])
     assert not bool(frame.loc["BBBUSDT", "is_live"]), "settling is not trading"
     assert not bool(frame.loc["CCCUSDT", "is_live"])
+
+
+def test_connection_pool_is_sized_to_the_worker_count() -> None:
+    """A pool smaller than the worker count churns connections instead of reusing them."""
+    from candlepilot.data.vision import VisionClient
+
+    client = VisionClient(pool_size=12)
+    adapter = client._session.get_adapter("https://data.binance.vision/x")
+    assert adapter.poolmanager.connection_pool_kw["maxsize"] == 12
+
+
+def test_default_pool_size_exceeds_the_default_worker_count() -> None:
+    """A plain VisionClient() must not be the bottleneck at default settings."""
+    import inspect
+
+    from candlepilot.data.ingest import ingest_symbols
+    from candlepilot.data.vision import DEFAULT_POOL_SIZE
+
+    default_workers = inspect.signature(ingest_symbols).parameters["workers"].default
+    assert DEFAULT_POOL_SIZE >= default_workers
