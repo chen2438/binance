@@ -71,3 +71,21 @@ def test_archive_url_for_daily_funding() -> None:
         "https://data.binance.vision/data/futures/um/daily/fundingRate/"
         "BTCUSDT/BTCUSDT-fundingRate-2026-07-05.zip"
     )
+
+
+def test_mark_price_archive_url_carries_interval() -> None:
+    archive = Archive("BTCUSDT", "markPriceKlines", "2024-06", "1m")
+    assert archive.is_interval_dataset
+    assert archive.url == (
+        "https://data.binance.vision/data/futures/um/monthly/markPriceKlines/"
+        "BTCUSDT/1m/BTCUSDT-1m-2024-06.zip"
+    )
+    assert archive.relative_path.as_posix() == (
+        "markPriceKlines/1m/BTCUSDT/BTCUSDT-1m-2024-06.zip"
+    )
+
+
+def test_funding_is_not_an_interval_dataset() -> None:
+    archive = Archive("BTCUSDT", "fundingRate", "2024-06")
+    assert not archive.is_interval_dataset
+    assert archive.filename == "BTCUSDT-fundingRate-2024-06.zip"

@@ -60,6 +60,10 @@ KLINE_OUTPUT_COLUMNS = [
     "taker_buy_quote_volume",
 ]
 
+# Mark-price archives reuse the kline layout, but every volume/trade field is zero
+# (mark price is derived from the spot index, not from trades). Only OHLC is kept.
+MARK_OUTPUT_COLUMNS = ["open_time", "open", "high", "low", "close"]
+
 FUNDING_COLUMNS = ["calc_time", "funding_interval_hours", "last_funding_rate"]
 
 FUNDING_DTYPES = {
@@ -88,8 +92,9 @@ def _check_epoch_ms(series: pd.Series, label: str) -> None:
         )
 
 
-def parse_klines(raw: bytes) -> pd.DataFrame:
+def parse_klines(raw: bytes, *, columns: list[str] | None = None) -> pd.DataFrame:
     """Parse a raw kline CSV payload into a normalized DataFrame."""
+    columns = columns or KLINE_OUTPUT_COLUMNS
     frame = pd.read_csv(
         io.BytesIO(raw),
         header=0 if _has_header(raw, "open_time") else None,
@@ -97,14 +102,19 @@ def parse_klines(raw: bytes) -> pd.DataFrame:
         dtype=KLINE_DTYPES,
     )
     if frame.empty:
-        return frame.reindex(columns=KLINE_OUTPUT_COLUMNS)
+        return frame.reindex(columns=columns)
 
     frame["open_time"] = frame["open_time"].astype("int64")
     _check_epoch_ms(frame["open_time"], "kline open_time")
 
-    frame = frame.loc[:, KLINE_OUTPUT_COLUMNS]
+    frame = frame.loc[:, columns]
     frame = frame.drop_duplicates(subset="open_time", keep="last")
     return frame.sort_values("open_time", ignore_index=True)
+
+
+def parse_mark_klines(raw: bytes) -> pd.DataFrame:
+    """Parse a mark-price archive, keeping only OHLC."""
+    return parse_klines(raw, columns=MARK_OUTPUT_COLUMNS)
 
 
 def parse_funding(raw: bytes) -> pd.DataFrame:

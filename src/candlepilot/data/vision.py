@@ -35,36 +35,47 @@ class DownloadError(RuntimeError):
     """Raised when an archive cannot be fetched or fails verification."""
 
 
+# Datasets keyed by a bar interval; their paths carry an extra interval segment and
+# their filenames use the interval rather than the dataset name.
+INTERVAL_DATASETS = frozenset(
+    {"klines", "markPriceKlines", "indexPriceKlines", "premiumIndexKlines"}
+)
+
+
 @dataclass(frozen=True)
 class Archive:
     """One downloadable monthly or daily archive."""
 
     symbol: str
-    kind: str  # "klines" or "fundingRate"
+    kind: str  # e.g. "klines", "markPriceKlines", "fundingRate"
     period: str  # "YYYY-MM" for monthly, "YYYY-MM-DD" for daily
-    interval: str | None = None  # kline interval; None for fundingRate
+    interval: str | None = None  # bar interval; None for non-interval datasets
 
     @property
     def granularity(self) -> str:
         return "daily" if len(self.period) == 10 else "monthly"
 
     @property
+    def is_interval_dataset(self) -> bool:
+        return self.kind in INTERVAL_DATASETS
+
+    @property
     def filename(self) -> str:
-        if self.kind == "klines":
+        if self.is_interval_dataset:
             return f"{self.symbol}-{self.interval}-{self.period}.zip"
         return f"{self.symbol}-{self.kind}-{self.period}.zip"
 
     @property
     def url(self) -> str:
         parts = ["data", "futures", "um", self.granularity, self.kind, self.symbol]
-        if self.kind == "klines":
+        if self.is_interval_dataset:
             parts.append(self.interval or "")
         return f"{DATA_URL}/{'/'.join(parts)}/{self.filename}"
 
     @property
     def relative_path(self) -> Path:
         parts = [self.kind, self.symbol]
-        if self.kind == "klines":
+        if self.is_interval_dataset:
             parts.insert(1, self.interval or "")
         return Path(*parts) / self.filename
 

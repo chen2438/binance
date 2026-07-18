@@ -36,8 +36,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest.add_argument(
         "--kinds",
         nargs="+",
-        default=["klines", "fundingRate"],
-        choices=["klines", "fundingRate"],
+        default=["klines", "markPriceKlines", "fundingRate"],
+        choices=["klines", "markPriceKlines", "fundingRate"],
     )
     ingest.add_argument("--workers", type=int, default=8)
     ingest.add_argument("--live-only", action="store_true", help="skip delisted symbols")

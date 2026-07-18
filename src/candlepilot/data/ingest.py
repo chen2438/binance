@@ -20,9 +20,15 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from .schema import parse_funding, parse_klines
+from .schema import parse_funding, parse_klines, parse_mark_klines
 from .store import ParquetStore
-from .vision import Archive, DownloadError, VisionClient
+from .vision import INTERVAL_DATASETS, Archive, DownloadError, VisionClient
+
+_PARSERS = {
+    "klines": parse_klines,
+    "markPriceKlines": parse_mark_klines,
+    "fundingRate": parse_funding,
+}
 
 log = logging.getLogger("candlepilot.ingest")
 
@@ -93,7 +99,7 @@ def _ingest_one(
         report.missing += 1
         return
 
-    frame = parse_klines(raw) if archive.kind == "klines" else parse_funding(raw)
+    frame = _PARSERS[archive.kind](raw)
     if frame.empty:
         report.missing += 1
         return
@@ -108,7 +114,7 @@ def ingest_symbols(
     start: str,
     end: str,
     interval: str = "1m",
-    kinds: tuple[str, ...] = ("klines", "fundingRate"),
+    kinds: tuple[str, ...] = ("klines", "markPriceKlines", "fundingRate"),
     store: ParquetStore | None = None,
     client: VisionClient | None = None,
     workers: int = 8,
@@ -126,7 +132,7 @@ def ingest_symbols(
                 plan_archives(
                     symbol,
                     kind=kind,
-                    interval=interval if kind == "klines" else None,
+                    interval=interval if kind in INTERVAL_DATASETS else None,
                     start=start,
                     end=end,
                     today=today,

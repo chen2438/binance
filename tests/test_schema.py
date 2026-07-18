@@ -66,3 +66,13 @@ def test_funding_rejects_unexpected_timestamp_unit() -> None:
     raw = b"calc_time,funding_interval_hours,last_funding_rate\n17172000000000000,8,0.0001\n"
     with pytest.raises(SchemaError, match="epoch-millisecond"):
         parse_funding(raw)
+
+
+def test_mark_klines_keep_only_ohlc() -> None:
+    """Mark-price archives zero out every volume field; keeping them invites misuse."""
+    from candlepilot.data.schema import parse_mark_klines
+
+    row = "1717200000000,67570.93,67613.44,67570.93,67602.74,0,1717200059999,0,60,0,0,0\n"
+    frame = parse_mark_klines((HEADER + row).encode())
+    assert list(frame.columns) == ["open_time", "open", "high", "low", "close"]
+    assert frame["high"].iloc[0] == pytest.approx(67613.44)

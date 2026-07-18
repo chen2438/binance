@@ -48,9 +48,14 @@ class ParquetStore:
         *,
         start: str | None = None,
         end: str | None = None,
+        kind: str = "klines",
     ) -> pd.DataFrame:
-        """Load a symbol's klines as a UTC-indexed DataFrame."""
-        directory = self.root / "klines" / interval / symbol
+        """Load a symbol's klines as a UTC-indexed DataFrame.
+
+        ``kind="markPriceKlines"`` loads the mark-price series, which is what
+        liquidation is evaluated against.
+        """
+        directory = self.root / kind / interval / symbol
         files = sorted(directory.glob(f"{symbol}-{interval}-*.parquet"))
         if not files:
             return pd.DataFrame()
@@ -61,6 +66,19 @@ class ParquetStore:
         frame.index = pd.to_datetime(frame["open_time"], unit="ms", utc=True)
         frame.index.name = "open_time_utc"
         return frame.loc[start:end]
+
+    def load_mark_klines(
+        self,
+        symbol: str,
+        interval: str = "1m",
+        *,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> pd.DataFrame:
+        """Load the mark-price series used for liquidation checks."""
+        return self.load_klines(
+            symbol, interval, start=start, end=end, kind="markPriceKlines"
+        )
 
     def load_funding(
         self,
