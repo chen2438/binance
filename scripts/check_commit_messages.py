@@ -19,6 +19,14 @@ OPENAI_EMAIL = "noreply@openai.com"
 CLAUDE_EMAIL = "noreply@anthropic.com"
 HUMAN_TRAILER = "Human-authored: true"
 
+# A literal \n is only a defect where it stands in for message structure: ending a
+# line, doubled as a would-be blank line, or introducing a trailer. Prose that merely
+# mentions the escape sequence mid-sentence is left alone.
+LITERAL_NEWLINE = re.compile(
+    r"\\n(?:\s*$|\\n|(?=[A-Za-z][A-Za-z-]*:\s))",
+    re.MULTILINE,
+)
+
 
 def validate_message(message: str) -> list[str]:
     lines = [line.rstrip() for line in message.replace("\r\n", "\n").split("\n")]
@@ -28,8 +36,11 @@ def validate_message(message: str) -> list[str]:
     errors: list[str] = []
     if not lines:
         return ["commit message is empty"]
-    if "\\n" in message:
-        errors.append("commit message contains a literal \\n instead of a real newline")
+    if LITERAL_NEWLINE.search(message):
+        errors.append(
+            "commit message uses a literal \\n where a real newline belongs "
+            "(line break, blank line, or trailer separator)"
+        )
     if not CONVENTIONAL_TITLE.fullmatch(lines[0]):
         errors.append("title must use Conventional Commit format")
     if len(lines) < 2 or lines[1] != "":

@@ -26,7 +26,7 @@
    - `Co-authored-by: GPT-<版本> <noreply@openai.com>`
    - `Co-authored-by: Claude <...> <noreply@anthropic.com>`
    - 或纯人工提交的 `Human-authored: true`
-5. message 中不得包含字面量 `\n`。
+5. 不得用字面量 `\n` 代替真正的换行。该检查只针对**结构位置**，即字面量 `\n` 出现在行尾、连续出现（充当空行），或紧接一个 trailer（形如 `Xxx-yyy: `）之前。正文中作为普通文字提到 `\n`（例如说明转义规则）不会被拦截。
 
 ### 调用方式
 
