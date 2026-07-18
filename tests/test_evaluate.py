@@ -249,3 +249,75 @@ def test_walk_forward_refuses_when_no_fold_fits() -> None:
         run_walk_forward(
             frame, DonchianBreakout, {"lookback": [60]}, train="90D", test="30D"
         )
+
+
+# ------------------------------------------------------------------- baselines
+
+
+def test_baselines_respect_the_hold_period() -> None:
+    from candlepilot.backtest.costs import CostModel
+    from candlepilot.backtest.engine import Backtest
+    from candlepilot.strategies import BASELINES
+
+    frame = make_frame(60 * 24 * 3, seed=11)
+    for name, factory in BASELINES.items():
+        strategy = factory(hold=5)
+        result = Backtest(
+            frame, cost_model=CostModel(taker_fee=0.0, maker_fee=0.0, slippage=0.0)
+        ).run(strategy)
+        held = [t.bars_held for t in result.trades if t.exit_reason == "signal"]
+        assert all(h <= 6 for h in held), f"{name} held past its hold period"
+
+
+def test_funding_carry_shorts_when_longs_are_paying() -> None:
+    """Positive funding means longs pay shorts, so the carry side is short."""
+    from candlepilot.backtest.costs import CostModel
+    from candlepilot.backtest.engine import Backtest
+    from candlepilot.strategies import FundingCarry
+
+    frame = make_frame(400, seed=12)
+    frame["funding_rate"] = 0.001  # persistently positive
+
+    result = Backtest(
+        frame, cost_model=CostModel(taker_fee=0.0, maker_fee=0.0, slippage=0.0)
+    ).run(FundingCarry())
+    assert result.trades
+    assert all(t.side == -1 for t in result.trades)
+
+
+def test_funding_carry_goes_long_when_shorts_are_paying() -> None:
+    from candlepilot.backtest.costs import CostModel
+    from candlepilot.backtest.engine import Backtest
+    from candlepilot.strategies import FundingCarry
+
+    frame = make_frame(400, seed=13)
+    frame["funding_rate"] = -0.001
+
+    result = Backtest(
+        frame, cost_model=CostModel(taker_fee=0.0, maker_fee=0.0, slippage=0.0)
+    ).run(FundingCarry())
+    assert result.trades
+    assert all(t.side == 1 for t in result.trades)
+
+
+def test_momentum_and_reversion_take_opposite_sides() -> None:
+    """They mirror each other by construction; if they agree, one is miswired."""
+    from candlepilot.backtest.engine import BarContext
+    from candlepilot.strategies import MeanReversion, MomentumContinuation
+
+    frame = make_frame(200, seed=14)
+    rising = frame.copy()
+    rising["close"] = np.linspace(100, 130, len(rising))
+    rising["high"] = rising["close"] * 1.001
+    rising["low"] = rising["close"] * 0.999
+
+    i = len(rising) - 1
+    ctx = BarContext(
+        i=i, bar=rising.iloc[i], position=None, equity=10_000.0, _frame=rising
+    )
+    momentum = MomentumContinuation(lookback=20).on_bar(ctx)
+    reversion = MeanReversion(lookback=5).on_bar(ctx)
+
+    assert momentum is not None and reversion is not None
+    assert momentum.action == "long"
+    assert reversion.action == "short"
