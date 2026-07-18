@@ -47,6 +47,19 @@ def _build_parser() -> argparse.ArgumentParser:
     status.add_argument("--interval", default="1m")
     _add_common(status)
 
+    screen = sub.add_parser("screen", help="run a point-in-time symbol screen")
+    screen.add_argument("--symbols", nargs="+", help="restrict to these symbols")
+    screen.add_argument("--rank-by", default="dollar_range", help="feature to rank on")
+    screen.add_argument("--ascending", action="store_true")
+    screen.add_argument("--top", type=int, default=20)
+    screen.add_argument("--window", type=int, default=30, help="feature lookback in days")
+    screen.add_argument("--min-history", type=int, default=30)
+    screen.add_argument("--min-liquidity", type=float, default=1e6, help="median daily USDT")
+    screen.add_argument("--rebalance", default="W-MON")
+    screen.add_argument("--start")
+    screen.add_argument("--end")
+    _add_common(screen)
+
     return parser
 
 
@@ -90,6 +103,40 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(report)
         return 1 if report.failed else 0
+
+    if args.command == "screen":
+        from .screen import Screener, build_panel, compute_features, top_n
+        from .screen.screener import turnover
+
+        panel = build_panel(
+            store, args.symbols, interval="1d", start=args.start, end=args.end
+        )
+        features = compute_features(
+            panel, window=args.window, min_history=args.min_history
+        )
+        rule = top_n(
+            args.rank_by,
+            n=args.top,
+            ascending=args.ascending,
+            filters={"liquidity": (">=", args.min_liquidity)},
+        )
+        screener = Screener(rule, rebalance=args.rebalance)
+        selections = screener.run(features)
+
+        symbols_seen = panel.index.get_level_values("symbol").nunique()
+        print(f"panel: {symbols_seen} symbols, {len(panel):,} symbol-days")
+        print(f"rebalances: {len(selections)} ({args.rebalance})")
+        churn = turnover(selections)
+        if len(churn) > 1:
+            print(f"median turnover per rebalance: {churn.iloc[1:].median():.1%}")
+
+        latest = selections[-1] if selections else None
+        if latest:
+            date = latest.date.date()
+            print(f"\nlatest pool ({date}, {latest.candidates} eligible candidates):")
+            for rank, symbol in enumerate(latest.symbols, 1):
+                print(f"  {rank:2d}. {symbol}")
+        return 0
 
     if args.command == "status":
         summary = store.summary(args.interval)

@@ -10,7 +10,7 @@ CandlePilot 用于研究 **Binance USDT-M 永续合约**：先用规则筛选标
 
 ## 当前状态
 
-已完成数据管线与回测引擎核心。标的筛选层尚未实现。
+已完成数据管线、回测引擎核心与标的筛选层。多标的组合回测尚未实现。
 
 ## 目录结构
 
@@ -19,6 +19,7 @@ CandlePilot 用于研究 **Binance USDT-M 永续合约**：先用规则筛选标
 - `.githooks/commit-msg` — 版本化的 `commit-msg` hook，提交时调用校验器。
 - `src/candlepilot/data/` — 历史数据管线（下载、校验、解析、落盘）。
 - `src/candlepilot/backtest/` — 回测引擎（成本模型、持仓与强平、事件循环、指标）。
+- `src/candlepilot/screen/` — 标的筛选层（日线面板、时点特征、滚动标的池）。
 - `src/candlepilot/strategies/` — 策略；目前只有用于验证引擎的参考实现。
 - `src/candlepilot/cli.py` — `candlepilot` 命令行入口。
 - `tests/` — pytest 单元测试。
@@ -174,6 +175,56 @@ print(sweep_costs(bars, lambda: MyStrategy(), symbol="BTCUSDT"))
 ### 参考策略
 
 `strategies/reference.py` 的 `DonchianBreakout` **不是研究成果**，它存在的目的是让引擎能端到端验证、让成本扫描有东西可跑。它产出的任何回测数字都应视为测试夹具。
+
+## 标的筛选层
+
+### 日线筛选 / 1m 执行
+
+筛选跑日线，执行跑 1m。这不是妥协：同一个月的日线归档比 1m 归档小约 **865 倍**，这个差距决定了能筛全部 787 个标的、还是只能筛"手头方便的那几个"。而按方便程度挑标的池，正是幸存者偏差在被设计排除之后重新溜回来的路径。
+
+面板采用长表（`date`, `symbol` 双重索引）而非宽表。标的的存续区间各不相同，宽表会为尚未上市的标的凭空造出行，而那些 NaN 恰恰是粗糙的排序会当成信号的东西。
+
+### 时点正确性
+
+所有特征都用滚动窗口计算，然后**统一右移一天**：日期 `T` 上携带的值只由 `T-1` 及之前的数据推出。移位在 `compute_features` 里集中做一次，而不是每个特征各做各的——这样新加的特征不可能忘记移。
+
+移位按标的分组进行，因此在面板中相邻的两个标的之间，后一个不会继承前一个的最后一行。
+
+内置特征：`liquidity`（成交额中位数）、`realized_vol`、`momentum`、`funding_carry`、`range_ratio`、`dollar_range`。
+
+### 退市标的的处理
+
+退市在两个方向上都必须正确，方向相反：
+
+- 退市**之后**不可被选中。这是自动成立的：标的退市后面板里就没有它的行，任何后续调仓日都取不到它。
+- 退市**之前**必须可被选中。在 `T` 日选出的池子里包含一个 `T+3` 退市的标的是**正确的**——当时无从得知。把它剔除就是用了后见之明，而这种剔除正是抬高回测表现的主要来源。
+
+两个方向都有测试覆盖。
+
+### 调仓与标的池
+
+`Screener` 在每个调仓日对当日的合格截面应用规则。调仓日会吸附到面板中真实存在的日期上，否则一个没有数据的调仓日会静默地选出空池。
+
+合格性要求特征齐备且 `age_days >= min_history`——刚上市三天的标的不该参与排序。
+
+`turnover` 报告每次调仓被替换掉的比例（新池中不在旧池里的占比）。换手率高意味着规则在追噪声，而每一次替换都要付回测成本扫描里量到的往返成本。
+
+### 用法
+
+```bash
+candlepilot screen --rank-by dollar_range --top 20 --min-liquidity 1e6 --rebalance W-MON
+```
+
+```python
+from candlepilot.screen import build_panel, compute_features, Screener, top_n
+
+panel = build_panel(store, interval="1d", start="2023-01")
+features = compute_features(panel, window=30, min_history=30)
+rule = top_n("dollar_range", n=20, filters={"liquidity": (">=", 1e6)})
+selections = Screener(rule, rebalance="W-MON").run(features)
+```
+
+规则是 `Callable[[pd.DataFrame], list[str]]`，接收单个调仓日的合格截面，返回标的列表。`top_n` 只是内置的一种。
 
 ## 本地环境搭建
 
