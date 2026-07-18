@@ -1,0 +1,13 @@
+#!/bin/sh
+# Validate the commit message with the versioned checker.
+# Enabled via: git config core.hooksPath .githooks
+
+set -e
+
+if [ -x .venv/bin/python ]; then
+    PYTHON=.venv/bin/python
+else
+    PYTHON=python3
+fi
+
+exec "$PYTHON" scripts/check_commit_messages.py --message-file "$1"
