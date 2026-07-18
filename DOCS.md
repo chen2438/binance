@@ -10,7 +10,7 @@ CandlePilot 用于研究 **Binance USDT-M 永续合约**：先用规则筛选标
 
 ## 当前状态
 
-已完成数据管线、回测引擎核心与标的筛选层。多标的组合回测尚未实现。
+已完成数据管线、回测引擎核心、标的筛选层与多标的组合回测。
 
 ## 目录结构
 
@@ -18,7 +18,7 @@ CandlePilot 用于研究 **Binance USDT-M 永续合约**：先用规则筛选标
 - `scripts/check_commit_messages.py` — 提交信息校验器，本地 hook 与 CI 共用。
 - `.githooks/commit-msg` — 版本化的 `commit-msg` hook，提交时调用校验器。
 - `src/candlepilot/data/` — 历史数据管线（下载、校验、解析、落盘）。
-- `src/candlepilot/backtest/` — 回测引擎（成本模型、持仓与强平、事件循环、指标）。
+- `src/candlepilot/backtest/` — 回测引擎（成本模型、持仓与强平、执行语义、单标的与组合事件循环、指标）。
 - `src/candlepilot/screen/` — 标的筛选层（日线面板、时点特征、滚动标的池）。
 - `src/candlepilot/strategies/` — 策略；目前只有用于验证引擎的参考实现。
 - `src/candlepilot/cli.py` — `candlepilot` 命令行入口。
@@ -171,6 +171,33 @@ print(sweep_costs(bars, lambda: MyStrategy(), symbol="BTCUSDT"))
 `build_bars` 负责对齐：以成交价索引为准，标记价前向填充但限制陈旧时长（默认 15 分钟），无法确定标记价的 K 线标记为 `tradeable=False`，引擎在这些 K 线上拒绝开仓——没有可用标记价意味着强平判定是瞎的。
 
 `Backtest` 参数：`initial_equity`（默认 10000）、`risk_fraction`（每笔风险占权益比例，默认 1%）、`max_leverage`（默认 20，超过 20 直接报错）、`mmr`。
+
+### 组合回测
+
+`PortfolioBacktest` 把筛选层的滚动标的池接到引擎上，在共享权益下同时运行多个标的。
+
+**执行语义与单标的引擎共用** `SymbolExecutor`，两者的开仓、资金费结算、退出判定、平仓走同一份代码。若组合回测的成交判定与单标的哪怕只差一点，两者的结果就不再可比，而这个差异会被误读成策略效应而非引擎假象。
+
+三条策略决定，每一条都是回测容易自我美化的地方：
+
+1. **调出标的池不强制平仓。** 标的被调出只会阻止**新开仓**，已有持仓不动。强制平仓会让调仓节奏覆盖策略自身的退出逻辑——周度调仓会把持仓期悄悄截断到一周，量到的边际就成了筛选规则的而非策略的。需要相反行为时用 `close_on_pool_exit=True` 显式开启。
+2. **退市强制平仓。** 持仓期间标的数据终止时，按最后一根 K 线收盘价平仓并标记 `delisted`。让持仓凭空消失等于把亏损丢在地上——正是数据层费力避免的幸存者偏差。
+3. **权益共享。** 风险按组合总权益定仓，各标的争夺同一份资金，一个标的的回撤会缩小其余所有仓位。分别跑单标的回测再相加等于假设资金无限。
+
+`max_positions` 限制同时持仓数；达到上限时新信号计入 `skipped_at_capacity` 而非静默丢弃。结果对象另外报告 `skipped_out_of_pool`、`skipped_untradeable`、`delisted_exits`，这些计数是判断"策略没交易"到底是没信号还是被约束挡住的依据。
+
+```python
+from candlepilot.backtest import PortfolioBacktest
+
+bars = {sym: build_bars(store, sym, start="2024-03", end="2024-06") for sym in symbols}
+pool = Screener(rule, rebalance="W-MON").to_frame(features)   # date, symbol
+result = PortfolioBacktest(bars, pool, max_positions=3).run(lambda: MyStrategy())
+print(result.by_symbol())
+```
+
+`pool` 是含 `date` 与 `symbol` 两列的表，即 `Screener.to_frame` 的输出。策略工厂按标的各调用一次，因此有状态的策略不会在标的之间串状态。
+
+时间轴取所有标的时间戳的并集，因此上市时间不同的标的不会互相错位。
 
 ### 参考策略
 

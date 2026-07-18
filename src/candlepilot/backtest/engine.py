@@ -21,7 +21,8 @@ from typing import Protocol
 import pandas as pd
 
 from .costs import CostModel
-from .position import DEFAULT_MMR, Position, size_for_risk
+from .execution import Bar, SymbolExecutor
+from .position import DEFAULT_MMR, Position
 
 
 @dataclass(frozen=True)
@@ -120,130 +121,29 @@ class Backtest:
         self.risk_fraction = risk_fraction
         self.max_leverage = max_leverage
         self.mmr = mmr
+        # Shared with the portfolio backtest so both fill identically.
+        self.executor = SymbolExecutor(
+            cost_model=self.costs,
+            risk_fraction=risk_fraction,
+            max_leverage=max_leverage,
+            mmr=mmr,
+        )
 
     # ------------------------------------------------------------------ internals
 
-    def _open(self, intent: Intent, bar: pd.Series, i: int, equity: float) -> Position | None:
-        side = 1 if intent.action == "long" else -1
-        raw_price = float(bar["open"])
-        price = self.costs.fill_price(raw_price, side, opening=True)
-
-        stop = intent.stop_price
-        if stop is None:
-            return None
-        qty, margin = size_for_risk(
-            equity,
-            price,
-            stop,
-            risk_fraction=self.risk_fraction,
-            max_leverage=self.max_leverage,
-            mmr=self.mmr,
+    def _bar(self, row: pd.Series) -> Bar:
+        return Bar(
+            time=row.name,
+            open=float(row["open"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            close=float(row["close"]),
+            mark_low=float(row["mark_low"]),
+            mark_high=float(row["mark_high"]),
+            mark_close=float(row["mark_close"]),
+            funding_rate=float(row["funding_rate"]),
+            tradeable=bool(row["tradeable"]),
         )
-        if qty <= 0:
-            return None
-
-        position = Position(
-            side=side,
-            entry_price=price,
-            qty=qty,
-            margin=margin,
-            entry_index=i,
-            entry_time=bar.name,
-            stop_price=stop,
-            target_price=intent.target_price,
-            mmr=self.mmr,
-            tags=dict(intent.tags),
-        )
-        position.fees_paid += self.costs.fee(qty * price)
-        return position
-
-    def _resolve_exit(self, position: Position, bar: pd.Series) -> tuple[float, str] | None:
-        """Pick which level a bar triggers, assuming the worst plausible path.
-
-        Adverse levels are resolved in the order price would reach them, and a level
-        the bar **gapped through** fills at the open rather than at the level — a
-        stop is a trigger, not a guaranteed price. Ignoring that is what makes naive
-        backtests survive crashes they would not have survived: the gap-through is
-        the realistic route to liquidation, since correct sizing keeps the stop
-        nearer than the liquidation price in every ordinary bar.
-        """
-        side = position.side
-        open_price, low, high = float(bar["open"]), float(bar["low"]), float(bar["high"])
-        liq = position.liquidation_price()
-
-        def fill_for(level: float) -> float:
-            """Gapped-through levels fill at the open, which is worse."""
-            return min(level, open_price) if side > 0 else max(level, open_price)
-
-        adverse: list[tuple[float, str]] = []
-
-        if position.stop_price is not None:
-            stop = position.stop_price
-            if (low <= stop) if side > 0 else (high >= stop):
-                adverse.append((stop, "stop"))
-
-        liquidated = bool(bar["tradeable"]) and position.is_liquidated(
-            float(bar["mark_low"]), float(bar["mark_high"])
-        )
-        if liquidated:
-            adverse.append((liq, "liquidation"))
-
-        if adverse:
-            # A long is walked down through the higher level first; a short up.
-            adverse.sort(key=lambda item: -item[0] if side > 0 else item[0])
-            level, reason = adverse[0]
-            fill = fill_for(level)
-            # No exit can print beyond the liquidation price: the exchange would
-            # have force-closed the position before that fill was reachable.
-            if liquidated and ((fill < liq) if side > 0 else (fill > liq)):
-                return liq, "liquidation"
-            return fill, reason
-
-        if position.target_price is not None:
-            target = position.target_price
-            if (high >= target) if side > 0 else (low <= target):
-                # Filled at the level, never at a favourable gap.
-                return target, "target"
-
-        return None
-
-    def _close(
-        self,
-        position: Position,
-        price: float,
-        bar: pd.Series,
-        i: int,
-        reason: str,
-    ) -> tuple[Trade, float]:
-        fill = self.costs.fill_price(price, position.side, opening=False)
-        if reason == "liquidation":
-            # A liquidation is a forced market exit; the exchange also keeps the
-            # remaining margin, so the loss is floored at the margin posted.
-            fill = price
-        gross = position.side * position.qty * (fill - position.entry_price)
-        exit_fee = self.costs.fee(position.qty * fill)
-        fees = position.fees_paid + exit_fee
-        net = gross - fees - position.funding_paid
-        if reason == "liquidation":
-            net = max(net, -position.margin)
-
-        trade = Trade(
-            symbol=self.symbol,
-            side=position.side,
-            entry_time=position.entry_time,
-            exit_time=bar.name,
-            entry_price=position.entry_price,
-            exit_price=fill,
-            qty=position.qty,
-            margin=position.margin,
-            gross_pnl=gross,
-            fees=fees,
-            funding=position.funding_paid,
-            net_pnl=net,
-            exit_reason=reason,
-            bars_held=i - position.entry_index,
-        )
-        return trade, net
 
     # ----------------------------------------------------------------------- run
 
@@ -258,23 +158,31 @@ class Backtest:
         liquidations = 0
         skipped = 0
 
-        opens = frame["open"].to_numpy()
-        columns = frame.columns
-
         for i in range(len(frame)):
-            bar = frame.iloc[i]
+            row = frame.iloc[i]
+            bar = self._bar(row)
 
             # 1. Fill the previous bar's decision at this bar's open.
             if pending is not None:
                 if pending.action == "exit" and position is not None:
-                    trade, net = self._close(position, float(opens[i]), bar, i, "signal")
-                    trades.append(trade)
+                    fields, net = self.executor.close_position(
+                        position, bar.open, bar, i, "signal", symbol=self.symbol
+                    )
+                    trades.append(Trade(**fields))
                     equity += net
                     position = None
                 elif pending.action in ("long", "short") and position is None:
-                    if bool(bar["tradeable"]):
-                        position = self._open(pending, bar, i, equity)
-                    else:
+                    if bar.tradeable and pending.stop_price is not None:
+                        position = self.executor.open_position(
+                            side=1 if pending.action == "long" else -1,
+                            bar=bar,
+                            index=i,
+                            equity=equity,
+                            stop_price=pending.stop_price,
+                            target_price=pending.target_price,
+                            tags=pending.tags,
+                        )
+                    elif not bar.tradeable:
                         # No usable mark price means liquidation cannot be evaluated;
                         # entering anyway would silently disable the safety check.
                         skipped += 1
@@ -282,26 +190,25 @@ class Backtest:
 
             # 2. Funding settles against the open position.
             if position is not None:
-                rate = float(bar["funding_rate"])
-                if rate:
-                    mark = float(bar["mark_close"])
-                    position.funding_paid += position.side * position.qty * mark * rate
+                self.executor.settle_funding(position, bar)
 
             # 3./4. Liquidation and exit levels, worst-path ordering.
             if position is not None:
-                resolved = self._resolve_exit(position, bar)
+                resolved = self.executor.resolve_exit(position, bar)
                 if resolved is not None:
                     price, reason = resolved
-                    trade, net = self._close(position, price, bar, i, reason)
-                    trades.append(trade)
+                    fields, net = self.executor.close_position(
+                        position, price, bar, i, reason, symbol=self.symbol
+                    )
+                    trades.append(Trade(**fields))
                     equity += net
                     if reason == "liquidation":
                         liquidations += 1
                     position = None
 
             # 5. Strategy sees the closed bar and decides for the next one.
-            unrealized = position.unrealized(float(bar["close"])) if position else 0.0
-            ctx = BarContext(i=i, bar=bar, position=position, equity=equity, _frame=frame)
+            unrealized = position.unrealized(bar.close) if position else 0.0
+            ctx = BarContext(i=i, bar=row, position=position, equity=equity, _frame=frame)
             intent = strategy.on_bar(ctx)
             if intent is not None:
                 pending = intent

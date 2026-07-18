@@ -7,6 +7,7 @@ from .costs import COST_SCENARIOS, CostModel
 from .dataset import build_bars
 from .engine import Backtest, Intent, Strategy
 from .metrics import Metrics, summarize, sweep_costs
+from .portfolio import PortfolioBacktest, PortfolioResult
 from .position import Position, size_for_risk
 
 __all__ = [
@@ -15,6 +16,8 @@ __all__ = [
     "CostModel",
     "Intent",
     "Metrics",
+    "PortfolioBacktest",
+    "PortfolioResult",
     "Position",
     "Strategy",
     "build_bars",
