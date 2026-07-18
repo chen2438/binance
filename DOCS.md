@@ -10,7 +10,7 @@ CandlePilot 用于研究 **Binance USDT-M 永续合约**：先用规则筛选标
 
 ## 当前状态
 
-已完成数据管线（本文档「数据管线」一节）。回测引擎与筛选层尚未实现。
+已完成数据管线与回测引擎核心。标的筛选层尚未实现。
 
 ## 目录结构
 
@@ -18,6 +18,8 @@ CandlePilot 用于研究 **Binance USDT-M 永续合约**：先用规则筛选标
 - `scripts/check_commit_messages.py` — 提交信息校验器，本地 hook 与 CI 共用。
 - `.githooks/commit-msg` — 版本化的 `commit-msg` hook，提交时调用校验器。
 - `src/candlepilot/data/` — 历史数据管线（下载、校验、解析、落盘）。
+- `src/candlepilot/backtest/` — 回测引擎（成本模型、持仓与强平、事件循环、指标）。
+- `src/candlepilot/strategies/` — 策略；目前只有用于验证引擎的参考实现。
 - `src/candlepilot/cli.py` — `candlepilot` 命令行入口。
 - `tests/` — pytest 单元测试。
 - `.gitignore` — 忽略 `.DS_Store`、`.venv/`、Python 编译产物及 `data/`（可从上游重建）。
@@ -103,6 +105,66 @@ funding = store.load_funding("BTCUSDT")
 ```
 
 返回的 DataFrame 以 UTC DatetimeIndex 索引，按时间排序且去重。
+
+## 回测引擎
+
+### 排序规则
+
+引擎的正确性主要由三条排序规则承担（见 `backtest/engine.py`）：
+
+1. **信号在下一根 K 线开盘执行。** 策略在第 `i` 根收盘时决策，第 `i+1` 根开盘成交，决策无法消费自身结果。
+2. **K 线内路径假定不利。** 1m 粒度下无法知道价格在一根内的走法，因此同一根内触及多个价位时，不利的先触发；两个不利价位之间，离开盘价近的先触发。反向处理会产生系统性乐观偏差，且偏差随止损收紧而放大——正是日内策略所在的区间。
+3. **强平判定用标记价，止损止盈用成交价。** 两者是不同序列，理由见「标记价格」一节。
+
+**跳空穿越**：止损是触发条件而非成交保证。若一根 K 线开盘价已越过止损，成交按开盘价计而非止损价。忽略这一点会让回测在本该重创的行情里毫发无损——而且这正是强平的现实路径，因为正确的仓位规模会让止损在普通 K 线里总是先于强平触发。
+
+### 强平与仓位规模
+
+强平**刻意建得粗**。Binance 真实的维持保证金来自按名义价值分层的 MMR，分层历次调整且不公布历史值，因此"精确"重建只会精确地错。用单一保守值（0.5%）诚实得多。
+
+这个近似之所以够用，是因为**强平不应成为约束**：20x 下强平位约在 4.5% 外，而实测崩盘月（2024-08 DOGEUSDT）单分钟标记价最大跌幅只有 3.0%。强平是"仓位算错了"的告警，不是常规退出，因此结果里单独统计 `liquidations` 而不混进普通交易。
+
+维持这一点需要仓位规模配合。`size_for_risk` 先按「每笔风险占权益的固定比例」和止损距离定数量，再**按止损距离补足保证金**，使强平位始终在止损之外（默认留 1.5 倍缓冲）。若只按 `名义价值/最大杠杆` 交保证金，每笔都会顶在 20x，强平位固定在 4.5% 外，任何比它宽的止损都永远无法触发，强平就退化成了常规退出路径。
+
+### 成本模型
+
+成本是**被扫描的参数，不是常数**。`sweep_costs` 用同一策略跑四档场景并对比，单一成本假设下的回测基本不具参考价值。
+
+| 场景 | 单边滑点 | 往返成本 |
+|---|---|---|
+| `optimistic` | 0 | 0.10%（仅手续费，不可能跑赢的上界） |
+| `base` | 0.02% | 0.14% |
+| `conservative` | 0.05% | 0.20% |
+| `stress` | 0.10% | 0.30% |
+
+费率按 Binance USDT-M VIP0：maker 0.02%，taker 0.05%（每边）。滑点另有 `slippage_for_liquidity`，按标的每根 K 线的成交额中位数分层——固定滑点会系统性美化流动性最差的小市值标的，而筛选规则最容易命中的恰是这些。
+
+**杠杆会放大成本相对权益的占比，这一点比放大盈亏更容易被忽略。** 20x 下往返 0.10% 的手续费相当于权益的 2%；若每笔风险预算是权益的 1%，手续费就是风险预算的两倍。实测参考策略单笔最差止损 -172.5，拆开是价格走到止损 -88（在 1% 预算内）、滑点 -24、手续费 -60。策略设计必须从一开始就按这个量级考虑交易频率。
+
+### 用法
+
+```python
+from candlepilot.data.store import ParquetStore
+from candlepilot.backtest import build_bars, sweep_costs, Backtest, summarize
+
+store = ParquetStore("data")
+bars = build_bars(store, "BTCUSDT", start="2024-01", end="2024-06")
+
+result = Backtest(bars, symbol="BTCUSDT").run(MyStrategy())
+print(summarize(result))
+
+print(sweep_costs(bars, lambda: MyStrategy(), symbol="BTCUSDT"))
+```
+
+策略实现 `on_bar(ctx) -> Intent | None`。`ctx.history` 是第 0..i 根，是策略能看到的唯一历史窗口；引擎不暴露完整 frame，以免无意中前视。`Intent` 的 `action` 取 `"long" / "short" / "exit"`，做多做空必须给 `stop_price`（没有止损就无法定仓位规模）。
+
+`build_bars` 负责对齐：以成交价索引为准，标记价前向填充但限制陈旧时长（默认 15 分钟），无法确定标记价的 K 线标记为 `tradeable=False`，引擎在这些 K 线上拒绝开仓——没有可用标记价意味着强平判定是瞎的。
+
+`Backtest` 参数：`initial_equity`（默认 10000）、`risk_fraction`（每笔风险占权益比例，默认 1%）、`max_leverage`（默认 20，超过 20 直接报错）、`mmr`。
+
+### 参考策略
+
+`strategies/reference.py` 的 `DonchianBreakout` **不是研究成果**，它存在的目的是让引擎能端到端验证、让成本扫描有东西可跑。它产出的任何回测数字都应视为测试夹具。
 
 ## 本地环境搭建
 
