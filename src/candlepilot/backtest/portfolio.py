@@ -126,11 +126,23 @@ class PortfolioBacktest:
 
     # ------------------------------------------------------------------ pool state
 
-    def _pool_schedule(self) -> tuple[np.ndarray, list[set[str]]]:
-        """Rebalance timestamps and the symbol set in force from each one."""
+    def _pool_schedule(self) -> tuple[np.ndarray, list[dict[str, int]]]:
+        """Rebalance timestamps and the symbol -> side mapping in force from each.
+
+        A pool without a ``side`` column assigns 0, meaning "in the pool, direction
+        left to the strategy".
+        """
         if self.pool.empty:
             return np.array([], dtype="datetime64[ns]"), []
-        grouped = self.pool.groupby("date")["symbol"].apply(set).sort_index()
+
+        frame = self.pool
+        sides = frame["side"] if "side" in frame.columns else pd.Series(0, index=frame.index)
+        tagged = frame.assign(_side=sides)
+        grouped = (
+            tagged.groupby("date")
+            .apply(lambda g: dict(zip(g["symbol"], g["_side"])), include_groups=False)
+            .sort_index()
+        )
         return grouped.index.to_numpy(), grouped.tolist()
 
     # ------------------------------------------------------------------------ run
@@ -156,7 +168,7 @@ class PortfolioBacktest:
 
         liquidations = delisted = skipped_mark = skipped_cap = skipped_pool = 0
         pool_cursor = -1
-        active_pool: set[str] = set()
+        active_pool: dict[str, int] = {}
 
         for step, now in enumerate(timeline):
             # Advance the screen: the pool selected at or before `now` is in force.
@@ -192,6 +204,7 @@ class PortfolioBacktest:
                 row = feed.frame.iloc[i]
                 bar = _to_bar(row)
                 in_pool = feed.symbol in active_pool
+                pool_side = int(active_pool.get(feed.symbol, 0))
 
                 # 1. Fill the previous bar's decision.
                 if feed.pending is not None:
@@ -248,7 +261,12 @@ class PortfolioBacktest:
 
                 # 4. Strategy decides for this symbol's next bar.
                 ctx = BarContext(
-                    i=i, bar=row, position=feed.position, equity=equity, _frame=feed.frame
+                    i=i,
+                    bar=row,
+                    position=feed.position,
+                    equity=equity,
+                    _frame=feed.frame,
+                    pool_side=pool_side,
                 )
                 intent = feed.strategy.on_bar(ctx)
                 if intent is not None:

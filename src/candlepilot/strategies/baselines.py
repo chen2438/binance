@@ -184,3 +184,42 @@ BASELINES = {
     "reversion": MeanReversion,
     "funding_carry": FundingCarry,
 }
+
+
+class FollowPoolSide:
+    """Take the side a cross-sectional pool assigns, hold for a fixed period.
+
+    The signal is not here — it is the ranking in ``screen.cross.long_short_pool``.
+    This class only executes it, which keeps the point-in-time guarantees of the
+    feature panel intact: a strategy that recomputed the ranking itself would have
+    to be trusted not to peek, whereas a ranking produced by ``compute_features``
+    already cannot.
+
+    Convention: 5-bar hold, 2xATR(14) stop, matching the time-series baselines so
+    the two families are directly comparable.
+    """
+
+    name = "cross_sectional"
+
+    def __init__(self, hold: int = 5, atr_window: int = 14, stop_atr: float = 2.0):
+        self.hold = hold
+        self.atr_window = atr_window
+        self.stop_atr = stop_atr
+
+    def on_bar(self, ctx: BarContext) -> Intent | None:
+        if ctx.position is not None:
+            if ctx.i - ctx.position.entry_index >= self.hold:
+                return Intent("exit")
+            return None
+
+        if ctx.pool_side == 0 or ctx.i < self.atr_window + 1:
+            return None
+
+        atr = _atr(ctx, self.atr_window)
+        if not np.isfinite(atr) or atr <= 0:
+            return None
+
+        price = float(ctx.history["close"].to_numpy()[-1])
+        if ctx.pool_side > 0:
+            return Intent("long", stop_price=price - self.stop_atr * atr)
+        return Intent("short", stop_price=price + self.stop_atr * atr)

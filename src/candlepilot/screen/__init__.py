@@ -6,12 +6,14 @@ that cannot be reproduced live. Everything here is built so a rule can only ever
 data that existed at the moment it fires.
 """
 
+from .cross import long_short_pool
 from .features import FEATURES, compute_features
 from .panel import build_panel
 from .screener import Screener, ScreenRule, top_n
 
 __all__ = [
     "FEATURES",
+    "long_short_pool",
     "Screener",
     "ScreenRule",
     "build_panel",

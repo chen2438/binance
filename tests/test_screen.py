@@ -212,3 +212,54 @@ def test_momentum_is_computed_from_prior_closes_only() -> None:
     # Momentum carried on day 20 must equal the 5-day return ending on day 19.
     expected = closes[19] / closes[14] - 1
     assert features.loc[(dates[20], "AAAUSDT"), "momentum"] == pytest.approx(expected)
+
+
+# ------------------------------------------------------------ cross-sectional
+
+
+def test_long_short_pool_assigns_both_legs() -> None:
+    from candlepilot.screen.cross import long_short_pool
+
+    panel = make_panel({f"S{i}USDT": 60 for i in range(10)})
+    dates = panel.index.get_level_values("date").unique()
+    # Give each symbol a distinct, constant volume so the ranking is unambiguous.
+    for i in range(10):
+        panel.loc[(slice(None), f"S{i}USDT"), "quote_volume"] = float(i + 1) * 1e6
+
+    features = compute_features(panel, window=10, min_history=15)
+    pool = long_short_pool(features, "liquidity", n=2, rebalance="W-MON")
+
+    assert not pool.empty
+    assert set(pool["side"]) == {1, -1}
+    last = pool[pool["date"] == pool["date"].max()]
+    longs = set(last[last["side"] == 1]["symbol"])
+    shorts = set(last[last["side"] == -1]["symbol"])
+    assert longs == {"S9USDT", "S8USDT"}, "long leg must be the top of the ranking"
+    assert shorts == {"S0USDT", "S1USDT"}, "short leg must be the bottom"
+    assert not (longs & shorts)
+
+
+def test_reverse_flips_the_legs() -> None:
+    from candlepilot.screen.cross import long_short_pool
+
+    panel = make_panel({f"S{i}USDT": 60 for i in range(10)})
+    for i in range(10):
+        panel.loc[(slice(None), f"S{i}USDT"), "quote_volume"] = float(i + 1) * 1e6
+    features = compute_features(panel, window=10, min_history=15)
+
+    normal = long_short_pool(features, "liquidity", n=2)
+    flipped = long_short_pool(features, "liquidity", n=2, reverse=True)
+
+    date = normal["date"].max()
+    normal_longs = set(normal[(normal["date"] == date) & (normal["side"] == 1)]["symbol"])
+    flipped_shorts = set(flipped[(flipped["date"] == date) & (flipped["side"] == -1)]["symbol"])
+    assert normal_longs == flipped_shorts
+
+
+def test_pool_is_skipped_when_too_few_names_to_rank() -> None:
+    """Fewer than 2n eligible names would make the legs overlap."""
+    from candlepilot.screen.cross import long_short_pool
+
+    panel = make_panel({"AUSDT": 60, "BUSDT": 60})
+    features = compute_features(panel, window=10, min_history=15)
+    assert long_short_pool(features, "liquidity", n=5).empty

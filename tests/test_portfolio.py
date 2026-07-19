@@ -210,3 +210,51 @@ def test_leverage_cap_is_enforced() -> None:
     pool = make_pool({"2024-01-01": ["AAAUSDT"]})
     with pytest.raises(ValueError, match="20x"):
         PortfolioBacktest(bars, pool, max_leverage=25.0)
+
+
+def test_pool_side_is_passed_to_the_strategy() -> None:
+    """A cross-sectional pool assigns direction; the strategy must receive it."""
+    bars = {"LONGUSDT": make_bars(10), "SHORTUSDT": make_bars(10)}
+    pool = pd.DataFrame(
+        [
+            {"date": pd.Timestamp("2024-01-01", tz="UTC"), "symbol": "LONGUSDT", "side": 1},
+            {"date": pd.Timestamp("2024-01-01", tz="UTC"), "symbol": "SHORTUSDT", "side": -1},
+        ]
+    )
+
+    seen: dict[str, int] = {}
+
+    class RecordSide:
+        def __init__(self):
+            self.symbol = None
+
+        def on_bar(self, ctx):
+            seen[str(ctx.bar.name)] = ctx.pool_side
+            if ctx.i == 0 and ctx.pool_side != 0:
+                price = float(ctx.bar["close"])
+                if ctx.pool_side > 0:
+                    return Intent("long", stop_price=price * 0.95)
+                return Intent("short", stop_price=price * 1.05)
+            return None
+
+    result = PortfolioBacktest(bars, pool, cost_model=NO_COST, max_positions=5).run(
+        RecordSide
+    )
+    sides = {t.symbol: t.side for t in result.trades}
+    assert sides.get("LONGUSDT") == 1
+    assert sides.get("SHORTUSDT") == -1
+
+
+def test_pool_without_side_column_reports_zero() -> None:
+    """A plain long-only screen must not silently imply a direction."""
+    bars = {"AAAUSDT": make_bars(6)}
+    pool = make_pool({"2024-01-01": ["AAAUSDT"]})
+    observed = []
+
+    class Watch:
+        def on_bar(self, ctx):
+            observed.append(ctx.pool_side)
+            return None
+
+    PortfolioBacktest(bars, pool, cost_model=NO_COST).run(Watch)
+    assert set(observed) == {0}

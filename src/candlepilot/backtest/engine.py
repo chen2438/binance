@@ -44,6 +44,9 @@ class BarContext:
     position: Position | None
     equity: float
     _frame: pd.DataFrame
+    # Side assigned by a cross-sectional pool: +1 long, -1 short, 0 when the pool
+    # carries no side (a plain long-only screen) or the symbol is not in it.
+    pool_side: int = 0
 
     @property
     def history(self) -> pd.DataFrame:
